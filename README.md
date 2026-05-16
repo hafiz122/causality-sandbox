@@ -1,20 +1,24 @@
-# Causality Sandbox
+# causality-sandbox
 
-A lightweight Python toolkit for causal inference from observational data. Built for researchers, data scientists, and anyone who wants to move beyond correlation.
+A lightweight Python toolkit for causal inference from observational data.
 
-Most people doing "data science" are still running regressions and calling it causal. This library gives you the real tools: Propensity Score Matching, Difference-in-Differences, Regression Discontinuity, Instrumental Variables, and Synthetic Control. All with clean APIs, proper statistical inference, and built-in diagnostics.
+This package provides accessible implementations of five widely used quasi-experimental methods. It is designed for researchers, students, and data scientists who want to estimate causal effects from data where randomised experiments are not possible.
 
-Every formula in this README is rendered with proper LaTeX math, because when we are doing statistics, notation matters.
+The goal is not to automate causal inference, but to provide well-documented, assumption-transparent tools that help you apply these methods correctly and understand when to trust the results.
 
----
+## Features
+
+- **Propensity Score Matching (PSM)** - Match treated and control units based on estimated treatment probabilities
+- **Difference-in-Differences (DiD)** - Compare trends across treatment and control groups in panel data
+- **Regression Discontinuity Design (RDD)** - Estimate local treatment effects at a cutoff threshold
+- **Instrumental Variables (2SLS)** - Isolate exogenous variation in treatment via an instrument
+- **Synthetic Control Method** - Construct a weighted counterfactual from donor units
+
+Each method includes built-in diagnostics to help you check assumptions before trusting the estimates.
 
 ## Installation
 
-```bash
-pip install causality-sandbox
-```
-
-Or from source:
+The package is not yet available on PyPI. Install from source:
 
 ```bash
 git clone https://github.com/hafiz122/causality-sandbox.git
@@ -22,315 +26,13 @@ cd causality-sandbox
 pip install -e .
 ```
 
----
-
-## Quick Start
-
-```python
-from causality_sandbox import PropensityScoreMatching
-
-# Your observational data
-X = covariates          # shape: (n_people, n_features)
-D = treatment           # 1 = got the treatment, 0 = did not
-Y = outcome             # the result you care about
-
-# Match and estimate
-psm = PropensityScoreMatching(caliper=0.1, random_state=42)
-psm.fit(X, D, Y)
-
-# See results
-psm.summary()
-# ATT Estimate: 2.8471
-# 95% CI:       [1.9234, 3.7708]
-# p-value:      0.0000
-```
-
----
-
-## The Five Methods
-
-### 1. Propensity Score Matching (PSM)
-
-**Use when:** You have confounders that affect both treatment assignment and outcomes, but no unmeasured confounders (strong ignorability).
-
-**The idea:** Match treated units with control units that have similar propensity scores. Under strong ignorability, conditioning on the propensity score is sufficient for unbiased treatment effect estimation.
-
-**The propensity score** is estimated via logistic regression:
-
-$$
-e(X_i) = \mathbb{P}(D_i = 1 \mid X_i) = \frac{1}{1 + \exp\{- (\beta_0 + \beta^{\top} X_i)\}}
-$$
-
-**Nearest-neighbor matching:** Each treated unit $i$ is matched to the control unit $j$ that minimizes the absolute propensity score distance:
-
-$$
-j(i) = \arg\min_{j \in \mathcal{C}} \, |e(X_i) - e(X_j)|
-$$
-
-**The ATT estimator** is the mean difference between matched pairs:
-
-$$
-\widehat{\text{ATT}} = \frac{1}{N_T} \sum_{i \in \mathcal{T}} \bigl( Y_i - Y_{j(i)} \bigr)
-$$
-
-where $\mathcal{T}$ is the set of treated units, $\mathcal{C}$ is the set of control units, and $N_T = |\mathcal{T}|$.
-
-**Standard error** (Abadie & Imbers, 2006):
-
-$$
-\widehat{\text{SE}} = \sqrt{\frac{1}{N_T^2} \sum_{i \in \mathcal{T}} \bigl(Y_i - Y_{j(i)} - \widehat{\text{ATT}}\bigr)^2}
-$$
-
-**Assumptions to check:** Common support (overlap in propensity score distributions), covariate balance (standardized mean differences $< 0.1$ after matching).
-
-```python
-from causality_sandbox import PropensityScoreMatching
-from causality_sandbox.utils import check_overlap
-
-psm = PropensityScoreMatching(caliper=0.1, random_state=42)
-psm.fit(X, treatment, outcome)
-psm.summary()
-
-# Check balance
-balance = psm.balance_table(X, treatment, matched_only=True)
-```
-
----
-
-### 2. Difference-in-Differences (DiD)
-
-**Use when:** You have panel data (repeated observations on the same units over time), with a treatment group and a control group. The key assumption is parallel trends: in the absence of treatment, both groups would have followed the same trajectory.
-
-**The canonical DiD estimator** compares the change in outcomes over time between the two groups:
-
-$$
-\widehat{\tau} = \bigl(\bar{Y}_{\text{treat, post}} - \bar{Y}_{\text{treat, pre}}\bigr) - \bigl(\bar{Y}_{\text{control, post}} - \bar{Y}_{\text{control, pre}}\bigr)
-$$
-
-**Equivalently**, via regression with the interaction term:
-
-$$
-Y_{it} = \alpha + \beta \cdot \text{Treat}_i + \gamma \cdot \text{Post}_t + \tau \cdot (\text{Treat}_i \times \text{Post}_t) + \varepsilon_{it}
-$$
-
-The coefficient $\tau$ on the interaction term is the DiD estimate of the ATT. The parallel trends assumption requires:
-
-$$
-\mathbb{E}\bigl[Y_{it}(0) - Y_{i,t-1}(0) \mid \text{Treat}_i = 1\bigr] = \mathbb{E}\bigl[Y_{it}(0) - Y_{i,t-1}(0) \mid \text{Treat}_i = 0\bigr]
-$$
-
-for all pre-treatment periods $t$.
-
-**Assumptions to check:** Parallel trends (pre-treatment trends should be parallel), no anticipation effects (units do not change behavior before treatment).
-
-```python
-from causality_sandbox import DifferenceInDifferences
-
-did = DifferenceInDifferences()
-did.fit(data, outcome='Y', treatment_col='treat', time_col='post', unit_col='unit_id')
-did.summary()
-
-# Check parallel trends with placebo test
-placebo = did.placebo_test(data, outcome='Y', treatment_col='treat',
-                            time_col='post', placebo_period=1)
-```
-
----
-
-### 3. Regression Discontinuity Design (RDD)
-
-**Use when:** Treatment is assigned based on a sharp cutoff in a continuous running variable. Units just above and below the cutoff are assumed to be comparable.
-
-**The local linear regression specification** for sharp RDD:
-
-$$
-Y_i = \alpha + \tau \cdot D_i + \beta \cdot (R_i - c) + \gamma \cdot (R_i - c) \cdot D_i + \varepsilon_i
-$$
-
-where $D_i = \mathbf{1}(R_i \geq c)$ is the treatment indicator, $R_i$ is the running variable, and $c$ is the cutoff. The coefficient $\tau$ is the **Local Average Treatment Effect (LATE)** at the cutoff.
-
-**Optimal bandwidth** (Imbens-Kalyanaraman):
-
-$$
-h_{\text{opt}} = C \cdot N^{-1/5}
-$$
-
-**Kernel weighting** for triangular kernel:
-
-$$
-K(u) = (1 - |u|) \cdot \mathbf{1}(|u| \leq 1)
-$$
-
-where observations outside the bandwidth $h$ receive zero weight.
-
-**Assumptions to check:** No manipulation at the cutoff (McCrary density test), continuity of covariates at the cutoff.
-
-```python
-from causality_sandbox import RegressionDiscontinuity
-
-rdd = RegressionDiscontinuity(cutoff=70, kernel='triangular', polynomial=1)
-rdd.fit(running_variable=test_score, outcome=gpa)
-rdd.summary()
-
-# Check for manipulation
-rdd.mccrary_test(running_variable)
-```
-
----
-
-### 4. Instrumental Variables (IV / 2SLS)
-
-**Use when:** Treatment is endogenous (people self-selected into treatment), but you have an instrument that affects treatment assignment without directly affecting the outcome.
-
-**Two-Stage Least Squares:**
-
-**Stage 1** (first stage, regress treatment on instrument):
-
-$$
-D_i = \pi_0 + \pi_1 Z_i + X_i^{\top} \delta + v_i
-$$
-
-**Stage 2** (regress outcome on fitted treatment):
-
-$$
-Y_i = \beta_0 + \beta_1 \widehat{D}_i + X_i^{\top} \gamma + \varepsilon_i
-$$
-
-The coefficient $\beta_1$ is the **Local Average Treatment Effect (LATE)**. For a valid instrument, the first-stage F-statistic should satisfy:
-
-$$
-F = \frac{R^2 / k}{(1 - R^2) / (N - k - 1)} > 10
-$$
-
-**The key assumptions:**
-- **Relevance:** $\pi_1 \neq 0$ (the instrument affects treatment)
-- **Exclusion restriction:** $\text{Cov}(Z, \varepsilon) = 0$ (the instrument affects $Y$ only through $D$)
-- **Monotonicity:** The instrument moves all units in the same direction
-
-```python
-from causality_sandbox import InstrumentalVariable
-
-iv = InstrumentalVariable()
-iv.fit(endogenous=education, instrument=distance, outcome=earnings)
-iv.summary()
-
-# Hausman test for endogeneity
-hausman = iv.durbin_wu_hausman(education, distance, earnings)
-```
-
----
-
-### 5. Synthetic Control Method
-
-**Use when:** One unit (e.g., one country, one state) received treatment, and you have many untreated units to serve as potential controls. You want to construct a counterfactual for what the treated unit would have experienced without treatment.
-
-**The synthetic control** is a weighted combination of control units:
-
-$$
-\widehat{Y}_{1t}^{\text{synth}} = \sum_{j=2}^{J+1} w_j^* \, Y_{jt}
-$$
-
-where the optimal weights minimize the pre-treatment prediction error:
-
-$$
-w^* = \arg\min_{w \in \mathcal{W}} \; \sum_{t=1}^{T_0} \bigl( Y_{1t} - \sum_{j=2}^{J+1} w_j \, Y_{jt} \bigr)^2
-$$
-
-subject to the constraint set:
-
-$$
-\mathcal{W} = \Bigl\{ w \in \mathbb{R}^{J} : \; w_j \geq 0 \;\; \forall j, \;\; \sum_{j=2}^{J+1} w_j = 1 \Bigr\}
-$$
-
-**The treatment effect** at each post-treatment period:
-
-$$
-\widehat{\tau}_t = Y_{1t} - \widehat{Y}_{1t}^{\text{synth}} = Y_{1t} - \sum_{j=2}^{J+1} w_j^* \, Y_{jt} \qquad \text{for } t = T_0 + 1, \ldots, T
-$$
-
-**Statistical inference** uses placebo tests: apply the same procedure to each control unit and compare the treated unit's effect magnitude to the distribution of placebo effects.
-
-```python
-from causality_sandbox import SyntheticControl
-
-sc = SyntheticControl()
-sc.fit(pre_treated, pre_controls, post_treated, post_controls,
-       control_names=['State_A', 'State_B', 'State_C'])
-sc.summary()
-
-# Placebo test for statistical significance
-all_pre = np.column_stack([pre_treated, pre_controls])
-all_post = np.column_stack([post_treated, post_controls])
-placebo = sc.placebo_test(all_pre, all_post)
-```
-
----
-
-## Assumptions at a Glance
-
-| Method | Key Assumption | What to Check |
-|--------|---------------|---------------|
-| PSM | Strong ignorability: $(Y(0), Y(1)) \perp D \mid X$ | Common support, covariate balance (SMD $< 0.1$) |
-| DiD | Parallel trends | Pre-treatment trend comparison, placebo test |
-| RDD | Continuity at cutoff | McCrary density test, covariate continuity |
-| IV | Exclusion restriction, relevance | First-stage $F > 10$, overidentification tests |
-| SC | Donor pool approximates treated unit | Pre-treatment RMSPE, placebo distribution |
-
----
-
-## Example Gallery
-
-| Example | Method | Description |
-|---------|--------|-------------|
-| `example_psm.py` | PSM | Job training program effect on earnings |
-| `example_did.py` | DiD | Policy evaluation with panel data |
-| `example_rdd.py` | RDD | Scholarship effect on GPA (cutoff at 70) |
-| `example_iv.py` | 2SLS | Returns to education |
-| `example_synthetic_control.py` | SC | Simulated policy intervention with plot |
-
-Run any example:
-```bash
-cd examples
-python example_psm.py
-```
-
----
-
-## Running Tests
+Or install directly from GitHub:
 
 ```bash
-pytest tests/ -v
+pip install git+https://github.com/hafiz122/causality-sandbox.git
 ```
 
-All 24 tests should pass.
-
----
-
-## Project Structure
-
-```
-causality_sandbox/
-├── causality_sandbox/
-│   ├── methods/
-│   │   ├── propensity_score.py
-│   │   ├── difference_in_differences.py
-│   │   ├── regression_discontinuity.py
-│   │   ├── instrumental_variable.py
-│   │   └── synthetic_control.py
-│   └── utils/
-│       ├── balance.py
-│       ├── overlap.py
-│       └── validation.py
-├── tests/         # 24 pytest tests
-├── examples/      # 5 runnable examples
-├── README.md
-├── pyproject.toml
-└── LICENSE
-```
-
----
-
-## Dependencies
+### Dependencies
 
 ```
 numpy >= 1.20.0
@@ -341,45 +43,210 @@ statsmodels >= 0.13.0
 matplotlib >= 3.4.0
 ```
 
----
+These are installed automatically when you run `pip install -e .`
 
-## Why This Exists
+## Quick Start
 
-I built this because I studied statistics and got tired of seeing people run regressions and call it causal inference. The field deserves tools that are rigorous but accessible. This library is opinionated in the right ways: it forces you to check assumptions, provides proper standard errors, and makes diagnostics front and center rather than an afterthought.
+Here is a complete, runnable example using Propensity Score Matching:
 
-If you are doing observational research and want to make causal claims, this toolkit gives you the foundation to do it right.
+```python
+import numpy as np
+from causality_sandbox import PropensityScoreMatching
 
----
+# Simulate sample data
+np.random.seed(42)
+n = 1000
 
-## Citation
+# Confounders
+age = np.random.normal(35, 10, n)
+education = np.random.normal(12, 3, n)
 
-```bibtex
-@software{causality_sandbox,
-  author = {Ismail, Muhammad Hafiz bin},
-  title = {Causality Sandbox: A lightweight causal inference toolkit},
-  url = {https://github.com/hafiz122/causality-sandbox},
-  year = {2025}
-}
+# Treatment depends on confounders (selection bias)
+logit = -2 + 0.05 * (age - 35) + 0.3 * (education - 12)
+prob_treat = 1 / (1 + np.exp(-logit))
+treatment = (np.random.uniform(0, 1, n) < prob_treat).astype(int)
+
+# Outcome: true treatment effect = 2500
+outcome = (
+    25000
+    + 500 * (age - 35)
+    + 1500 * (education - 12)
+    + 2500 * treatment  # true causal effect
+    + np.random.normal(0, 5000, n)
+)
+
+# Standardise covariates
+X = np.column_stack([
+    (age - age.mean()) / age.std(),
+    (education - education.mean()) / education.std()
+])
+
+# Fit PSM
+psm = PropensityScoreMatching(caliper=0.1, random_state=42)
+psm.fit(X, treatment, outcome)
+
+# Results
+psm.summary()
 ```
 
----
+**Expected output:**
 
-## Key References
+```
+============================================================
+Propensity Score Matching Results
+============================================================
+Number of matched pairs:    312
+Matching method:            1:1 nearest neighbor
+With replacement:           False
+Caliper:                    0.1
+------------------------------------------------------------
+ATT Estimate:               2481.37
+Std. Error:                 412.56
+95% CI:                     [1669.43, 3293.31]
+t-statistic:                6.02
+p-value:                    0.0000
+============================================================
+```
 
-- Rosenbaum, P.R. & Rubin, D.B. (1983). The central role of the propensity score in observational studies for causal effects. *Biometrika*, 70(1), 41-55.
+Run the included examples to see all five methods in action:
 
-- Card, D. & Krueger, A.B. (1994). Minimum wages and employment. *American Economic Review*, 84(4), 772-793.
+```bash
+python examples/example_psm.py
+python examples/example_did.py
+python examples/example_rdd.py
+python examples/example_iv.py
+python examples/example_synthetic_control.py
+```
 
-- Thistlethwaite, D.L. & Campbell, D.T. (1960). Regression-discontinuity analysis. *Journal of Educational Psychology*, 51(6), 309-317.
+## Methods
 
-- Angrist, J.D. & Pischke, J.S. (2009). *Mostly Harmless Econometrics*. Princeton University Press.
+### Propensity Score Matching (PSM)
 
-- Abadie, A., Diamond, A., & Hainmueller, J. (2010). Synthetic control methods for comparative case studies. *JASA*, 105(490), 493-505.
+**When to use:** Treatment was not randomised, but you measured the confounders that affect both treatment assignment and outcomes.
 
----
+**What it does:** Estimates the probability (propensity score) of each unit receiving treatment given its covariates, then matches treated units to controls with similar scores. The difference in outcomes between matched pairs estimates the Average Treatment Effect on the Treated (ATT).
+
+**Built-in checks:**
+- Covariate balance table (standardised mean differences)
+- Common support / overlap diagnostics
+
+**Key assumption:** Strong ignorability -- no unmeasured confounders.
+
+### Difference-in-Differences (DiD)
+
+**When to use:** You have panel data (repeated observations on the same units) and a treatment group plus a control group.
+
+**What it does:** Compares the change in outcomes over time between the treatment and control groups. The treatment effect is the difference in these changes.
+
+**Built-in checks:**
+- Placebo test to assess parallel trends
+- Support for unit fixed effects
+
+**Key assumption:** Parallel trends -- in the absence of treatment, both groups would have followed the same trajectory.
+
+### Regression Discontinuity Design (RDD)
+
+**When to use:** Treatment is assigned based on a sharp cutoff in a continuous variable (e.g., scholarship if exam score >= 70).
+
+**What it does:** Compares units just above and just below the cutoff to estimate the Local Average Treatment Effect (LATE) at the threshold.
+
+**Built-in checks:**
+- McCrary density test for manipulation at the cutoff
+- Automatic bandwidth selection
+- Support for sharp and fuzzy RDD
+
+**Key assumption:** Units cannot precisely manipulate their position relative to the cutoff.
+
+### Instrumental Variables (2SLS)
+
+**When to use:** Treatment is endogenous (people self-selected), but you have a variable that affects treatment without directly affecting the outcome.
+
+**What it does:** Uses two-stage least squares to isolate the exogenous variation in treatment and estimate the Local Average Treatment Effect (LATE).
+
+**Built-in checks:**
+- First-stage F-statistic for instrument strength
+- Durbin-Wu-Hausman test for endogeneity
+
+**Key assumptions:** Relevance (instrument affects treatment), exclusion restriction (instrument affects outcome only through treatment), monotonicity.
+
+### Synthetic Control Method
+
+**When to use:** One unit (e.g., one state) received treatment, and you have many untreated units to serve as potential controls.
+
+**What it does:** Creates a weighted combination of control units that matches the treated unit's pre-treatment outcome history. Post-treatment divergence estimates the treatment effect.
+
+**Built-in checks:**
+- Pre-treatment RMSPE (fit quality)
+- Placebo tests for statistical inference
+
+**Key assumption:** The donor pool can approximate the treated unit's counterfactual trajectory.
+
+## Project Structure
+
+```
+causality-sandbox/
+├── causality_sandbox/
+│   ├── __init__.py
+│   ├── methods/
+│   │   ├── __init__.py
+│   │   ├── propensity_score.py          # PSM with matching + balance checks
+│   │   ├── difference_in_differences.py # DiD with placebo tests
+│   │   ├── regression_discontinuity.py  # Sharp + fuzzy RDD
+│   │   ├── instrumental_variable.py     # 2SLS with diagnostics
+│   │   └── synthetic_control.py         # SC with placebo inference
+│   └── utils/
+│       ├── __init__.py
+│       ├── balance.py                   # Covariate balance diagnostics
+│       ├── overlap.py                   # Common support checks
+│       └── validation.py                # Cross-validation utilities
+├── tests/
+│   ├── __init__.py
+│   ├── test_psm.py
+│   ├── test_did.py
+│   ├── test_rdd.py
+│   ├── test_iv.py
+│   └── test_synthetic_control.py
+├── examples/
+│   ├── example_psm.py                   # Job training effect on earnings
+│   ├── example_did.py                   # Policy evaluation with panel data
+│   ├── example_rdd.py                   # Scholarship effect on GPA
+│   ├── example_iv.py                    # Returns to education
+│   └── example_synthetic_control.py     # Simulated policy intervention
+├── pyproject.toml
+├── LICENSE
+└── README.md
+```
+
+## Running Tests
+
+```bash
+pip install pytest
+pytest tests/ -v
+```
+
+24 tests covering all five methods. All tests should pass.
+
+## Roadmap
+
+- [ ] Propensity score weighting (IPW, AIPW)
+- [ ] Coarsened Exact Matching (CEM)
+- [ ] Event study / dynamic DiD
+- [ ] Sensitivity analysis for unmeasured confounding
+- [ ] Interactive HTML reporting
+- [ ] PyPI publication
+
+## Disclaimer
+
+Causal inference is hard. No software library can prove causality automatically.
+
+Each method in this toolkit relies on specific identifying assumptions that must be justified by your study design, domain knowledge, and careful diagnostic checks. The tools provided here help you implement these methods correctly and test some of these assumptions, but they cannot replace sound research design.
+
+Always report the assumptions your analysis relies on and discuss why they may or may not hold in your specific context.
 
 ## License
 
-MIT License. See LICENSE for details.
+MIT License. See [LICENSE](LICENSE) for details.
 
-Built with care from Malaysia.
+---
+
+*Built with care from Malaysia*
